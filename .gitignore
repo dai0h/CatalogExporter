@@ -3,6 +3,6 @@ __pycache__/
 build/
 dist/
 *.spec
+*.zip
 .venv/
 data/
-
