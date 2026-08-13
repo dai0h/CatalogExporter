@@ -12,7 +12,8 @@ import winreg
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 VALUE_NAME = "CatalogExporter"
 OLD_VALUE_NAME = "DiskMenu"
-STARTUP_FILE = "CatalogExporter.cmd"
+STARTUP_FILE = "CatalogExporter.vbs"
+OLD_STARTUP_FILE = "CatalogExporter.cmd"
 
 
 def startup_folder() -> Path:
@@ -44,10 +45,16 @@ def install(command: Optional[str] = None) -> None:
     try:
         folder = startup_folder()
         folder.mkdir(parents=True, exist_ok=True)
+        escaped = cmd.replace('"', '""')
         (folder / STARTUP_FILE).write_text(
-            "@echo off\r\nstart \"\" " + cmd + "\r\n",
+            'Set sh = CreateObject("WScript.Shell")\r\n'
+            f'sh.Run "{escaped}", 0, False\r\n',
             encoding="utf-8",
         )
+        try:
+            (folder / OLD_STARTUP_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
     except OSError:
         pass
 
@@ -64,6 +71,7 @@ def uninstall() -> None:
         pass
     try:
         (startup_folder() / STARTUP_FILE).unlink(missing_ok=True)
+        (startup_folder() / OLD_STARTUP_FILE).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -75,4 +83,4 @@ def is_installed() -> bool:
         return True
     except FileNotFoundError:
         pass
-    return (startup_folder() / STARTUP_FILE).exists()
+    return (startup_folder() / STARTUP_FILE).exists() or (startup_folder() / OLD_STARTUP_FILE).exists()
