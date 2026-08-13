@@ -42,19 +42,10 @@ def install(command: Optional[str] = None) -> None:
                 pass
     except OSError:
         pass
+    # 只保留注册表启动项，移除 Start Menu 里的脚本，避免重复启动项和安全软件提示
     try:
-        folder = startup_folder()
-        folder.mkdir(parents=True, exist_ok=True)
-        escaped = cmd.replace('"', '""')
-        (folder / STARTUP_FILE).write_text(
-            'Set sh = CreateObject("WScript.Shell")\r\n'
-            f'sh.Run "{escaped}", 0, False\r\n',
-            encoding="utf-8",
-        )
-        try:
-            (folder / OLD_STARTUP_FILE).unlink(missing_ok=True)
-        except OSError:
-            pass
+        (startup_folder() / STARTUP_FILE).unlink(missing_ok=True)
+        (startup_folder() / OLD_STARTUP_FILE).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -83,4 +74,9 @@ def is_installed() -> bool:
         return True
     except FileNotFoundError:
         pass
-    return (startup_folder() / STARTUP_FILE).exists() or (startup_folder() / OLD_STARTUP_FILE).exists()
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_QUERY_VALUE) as key:
+            winreg.QueryValueEx(key, VALUE_NAME)
+        return True
+    except FileNotFoundError:
+        return False
