@@ -12,7 +12,7 @@ CatalogExporter 是一款面向普通用户的 Windows 便携软件：插入外�
 
 导出的 HTML 目录报告（演示数据）：
 
-![HTML 目录报告界面](assets/screenshot_html.png)
+![HTML 目录报告界面](assets/screenshot_html_v2.png)
 
 ---
 
