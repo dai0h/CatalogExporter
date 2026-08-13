@@ -1,0 +1,2 @@
+# 本软件仅使用 Python 标准库（tkinter / sqlite3 / ctypes），无需额外依赖。
+
