@@ -74,11 +74,11 @@ README 的「界面预览」一节共 5 张图，全部放在仓库根目录 `as
 
 | 文件 | 内容 |
 |---|---|
-| `assets/ui_light.png` | 软件主界面 · 浅色主题（约 1180×720） |
-| `assets/ui_dark.png` | 软件主界面 · 深色主题（约 1180×720） |
-| `assets/ui_settings_light.png` | 设置对话框 · 浅色（约 520×620） |
-| `assets/ui_settings_dark.png` | 设置对话框 · 深色（约 520×620） |
-| `assets/screenshot_html_v2.png` | 导出的 HTML 目录报告（演示数据） |
+| `assets/ui_light_20260815.png` | 软件主界面 · 浅色主题（约 1180×720） |
+| `assets/ui_dark_20260815.png` | 软件主界面 · 深色主题（约 1180×720） |
+| `assets/ui_settings_light_20260815.png` | 设置对话框 · 浅色（约 520×620） |
+| `assets/ui_settings_dark_20260815.png` | 设置对话框 · 深色（约 520×620） |
+| `assets/screenshot_html_20260815.png` | 导出的 HTML 目录报告（演示数据） |
 
 生成步骤（源码运行，Windows 桌面环境）：
 
