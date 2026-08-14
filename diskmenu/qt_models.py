@@ -153,10 +153,20 @@ class FileFilterProxyModel(QSortFilterProxyModel):
         self.size_max = size_max
         self.date_from = date_from
         self.date_to = date_to
-        self.invalidateFilter()
+        self._refresh_filter()
 
     def clear_filters(self) -> None:
         self.set_filters()
+
+    def _refresh_filter(self) -> None:
+        if hasattr(self, "beginFilterChange") and hasattr(self, "endFilterChange"):
+            self.beginFilterChange()
+            self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
+            return
+        if hasattr(self, "invalidateRowsFilter"):
+            self.invalidateRowsFilter()
+            return
+        self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
         model = self.sourceModel()

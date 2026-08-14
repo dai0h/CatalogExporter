@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QIcon
+import os
+from pathlib import Path
+
+from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication
 
 from .paths import asset_path
 
 THEMES = ("light", "dark")
+_FONT_LOADED = False
+_FONT_FILES = ("msyh.ttc", "msyh.ttf", "simhei.ttf", "simsun.ttc")
+_FONT_FAMILIES = (
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "SimHei",
+    "SimSun",
+    "Segoe UI",
+)
 
 
 LIGHT_QSS = """
@@ -152,9 +164,30 @@ QDialog QLabel { background: transparent; }
 """
 
 
+def _ensure_text_font(app: QApplication) -> None:
+    global _FONT_LOADED
+    families = set(QFontDatabase.families())
+    if not any(family in families for family in _FONT_FAMILIES[:-1]) and not _FONT_LOADED:
+        font_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        for filename in _FONT_FILES:
+            path = font_dir / filename
+            if not path.exists():
+                continue
+            font_id = QFontDatabase.addApplicationFont(str(path))
+            if font_id >= 0:
+                families.update(QFontDatabase.applicationFontFamilies(font_id))
+        _FONT_LOADED = True
+
+    for family in _FONT_FAMILIES:
+        if family in families:
+            app.setFont(QFont(family, 10))
+            return
+
+
 def apply_theme(app: QApplication, theme: str) -> None:
     """应用浅色/深色主题样式表。"""
     app.setStyle("Fusion")
+    _ensure_text_font(app)
     app.setStyleSheet(DARK_QSS if theme == "dark" else LIGHT_QSS)
 
 
