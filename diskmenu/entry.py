@@ -59,12 +59,19 @@ def start_tray(db_path: Optional[str] = None) -> None:
                 tray.stop()
             instance.release()
 
-        service = DiskMenuService(db_path=db_path)
+        tray = TrayIcon(
+            title=APP_TITLE,
+            on_open=open_gui,
+            on_quit=quit_app,
+            on_device_change=None,
+            db_path=db_path,
+        )
+        service = DiskMenuService(db_path=db_path, notify=tray.notify)
+        tray._on_device_change = service.wake
         service.start()
-        tray = TrayIcon(title=APP_TITLE, on_open=open_gui, on_quit=quit_app, on_device_change=service.wake)
+        # Qt 事件循环在 TrayIcon.start() 内阻塞运行
         tray.start()
-        # 托盘消息循环由独立线程运行；主线程等待退出事件
-        tray._thread.join()
+        tray.wait()
     except KeyboardInterrupt:
         pass
     finally:

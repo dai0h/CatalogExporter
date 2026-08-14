@@ -1,16 +1,4 @@
-"""把某块硬盘的索引导出为 v1.2 单个离线 HTML 文件。"""
-
-from __future__ import annotations
-
-import json
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
-
-from . import db
-
-
-HTML_TEMPLATE = r"""<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -1077,9 +1065,42 @@ HTML_TEMPLATE = r"""<!doctype html>
   </div>
 
   <script>
-    const DISK_INFO = __DISK_INFO_JSON__;
+    const DISK_INFO = {
+      driveLetter: "H:",
+      serialNumber: "USB-2026-08-14-A9F3",
+      lastScanTime: 1786695900,
+      exportTime: 1786700700,
+      usedBytes: 486 * 1024 * 1024 * 1024,
+      totalBytes: 932 * 1024 * 1024 * 1024
+    };
 
-    const DATA = __DATA_JSON__;
+    const DATA = [
+      ["H:\\", "H:", "", true, 0, 1786695600, ""],
+      ["H:\\照片", "照片", "H:\\", true, 0, 1786601200, ""],
+      ["H:\\照片\\旅行", "旅行", "H:\\照片", true, 0, 1786601300, ""],
+      ["H:\\照片\\旅行\\青海湖.jpg", "青海湖.jpg", "H:\\照片\\旅行", false, 5489216, 1786201200, "jpg"],
+      ["H:\\照片\\旅行\\日落.png", "日落.png", "H:\\照片\\旅行", false, 3948544, 1786208800, "png"],
+      ["H:\\照片\\证件照.webp", "证件照.webp", "H:\\照片", false, 785612, 1786122400, "webp"],
+      ["H:\\视频", "视频", "H:\\", true, 0, 1786500200, ""],
+      ["H:\\视频\\家庭录像.mp4", "家庭录像.mp4", "H:\\视频", false, 734003200, 1786420200, "mp4"],
+      ["H:\\视频\\剪辑素材.mov", "剪辑素材.mov", "H:\\视频", false, 1288490188, 1786415000, "mov"],
+      ["H:\\音乐", "音乐", "H:\\", true, 0, 1786300200, ""],
+      ["H:\\音乐\\现场录音.flac", "现场录音.flac", "H:\\音乐", false, 48234496, 1786100200, "flac"],
+      ["H:\\音乐\\播客.mp3", "播客.mp3", "H:\\音乐", false, 19844352, 1786120200, "mp3"],
+      ["H:\\文档", "文档", "H:\\", true, 0, 1786400200, ""],
+      ["H:\\文档\\合同.pdf", "合同.pdf", "H:\\文档", false, 2101248, 1786322200, "pdf"],
+      ["H:\\文档\\读书笔记.docx", "读书笔记.docx", "H:\\文档", false, 365568, 1786011200, "docx"],
+      ["H:\\文档\\预算表.xlsx", "预算表.xlsx", "H:\\文档", false, 549888, 1786001200, "xlsx"],
+      ["H:\\备份", "备份", "H:\\", true, 0, 1786502200, ""],
+      ["H:\\备份\\项目源码.zip", "项目源码.zip", "H:\\备份", false, 89128960, 1786502200, "zip"],
+      ["H:\\备份\\老电脑镜像.7z", "老电脑镜像.7z", "H:\\备份", false, 2147483648, 1786499200, "7z"],
+      ["H:\\工具", "工具", "H:\\", true, 0, 1786512200, ""],
+      ["H:\\工具\\DiskInfo.exe", "DiskInfo.exe", "H:\\工具", false, 15646720, 1786440000, "exe"],
+      ["H:\\工具\\清单生成器.msi", "清单生成器.msi", "H:\\工具", false, 33792000, 1786440200, "msi"],
+      ["H:\\工具\\配置.json", "配置.json", "H:\\工具", false, 2450, 1786440500, "json"],
+      ["H:\\临时", "临时", "H:\\", true, 0, 1786515200, ""],
+      ["H:\\临时\\未分类文件.bin", "未分类文件.bin", "H:\\临时", false, 1048576, 1786515200, "bin"]
+    ];
 
     const TYPE_GROUPS = {
       video: new Set(["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts"]),
@@ -1690,103 +1711,3 @@ HTML_TEMPLATE = r"""<!doctype html>
   </script>
 </body>
 </html>
-"""
-
-
-def _safe_int(value: object, default: int = 0) -> int:
-    try:
-        if value is None:
-            return default
-        return int(value)
-    except Exception:
-        return default
-
-
-def _disk_info_json(disk) -> str:
-    total_cap = _safe_int(disk["volume_size"])
-    free = _safe_int(disk["volume_free"])
-    used = max(0, total_cap - free) if total_cap > 0 else 0
-    info = {
-        "driveLetter": disk["drive_letter"] or "-",
-        "serialNumber": disk["volume_serial"] or "-",
-        "lastScanTime": _safe_int(disk["last_scan_finished"]),
-        "exportTime": int(datetime.now().timestamp()),
-        "usedBytes": used,
-        "totalBytes": total_cap,
-    }
-    return json.dumps(info, ensure_ascii=False).replace("</", "<\\/")
-
-
-def _root_path(disk) -> str:
-    drive = (disk["drive_letter"] or "").strip()
-    if drive:
-        return drive.rstrip("\\/") + "\\"
-    label = (disk["label"] or "").strip()
-    return label or "硬盘"
-
-
-def _root_name(disk, root_path: str) -> str:
-    label = (disk["label"] or "").strip()
-    drive = (disk["drive_letter"] or "").strip()
-    if label and drive and label != drive:
-        return f"{drive.rstrip('\\/')} {label}"
-    return label or root_path
-
-
-def _full_path(root_path: str, rel_path: str) -> str:
-    rel = (rel_path or "").strip("/\\")
-    if not rel:
-        return root_path
-    return root_path.rstrip("\\/") + "\\" + rel.replace("/", "\\")
-
-
-def export_html(
-    db_path: Optional[str],
-    disk_id: str,
-    out_path: str | Path,
-) -> tuple[bool, str]:
-    conn = db.connect(db_path)
-    try:
-        disk = db.get_disk(conn, disk_id)
-        if disk is None:
-            return False, "未找到该硬盘的索引"
-        rows = conn.execute(
-            "SELECT path, name, parent, is_dir, size, mtime, ext "
-            "FROM files WHERE disk_id=? ORDER BY path",
-            (disk_id,),
-        ).fetchall()
-        root_path = _root_path(disk)
-        root_name = _root_name(disk, root_path)
-        data = [[
-            root_path,
-            root_name,
-            "",
-            True,
-            0,
-            _safe_int(disk["last_scan_finished"]),
-            "",
-        ]]
-        data.extend([
-            [
-                _full_path(root_path, r["path"]),
-                r["name"],
-                _full_path(root_path, r["parent"]),
-                bool(r["is_dir"]),
-                _safe_int(r["size"]),
-                _safe_int(r["mtime"]),
-                (r["ext"] or ""),
-            ]
-            for r in rows
-        ])
-        data_json = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-        html_text = (
-            HTML_TEMPLATE
-            .replace("__DISK_INFO_JSON__", _disk_info_json(disk))
-            .replace("__DATA_JSON__", data_json)
-        )
-        out = Path(out_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(html_text, encoding="utf-8")
-        return True, str(out.resolve())
-    finally:
-        conn.close()

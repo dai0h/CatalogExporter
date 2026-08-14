@@ -1,60 +1,30 @@
-"""Windows 系统托盘图标与设备事件消息循环（ctypes 实现，无第三方依赖）。"""
+"""PySide6 系统托盘（QSystemTrayIcon）与 USB 设备事件监听。"""
 
 from __future__ import annotations
 
 import ctypes
-import os
 import threading
-import time
 from ctypes import wintypes
+from datetime import datetime
 from typing import Callable, Optional
 
-from .paths import APP_TITLE, app_data_dir, icon_path
+from PySide6.QtCore import QAbstractNativeEventFilter, QObject, Qt, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QSystemTrayIcon, QWidget
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-shell32 = ctypes.windll.shell32
+from . import db, exporter
+from .paths import APP_TITLE, icon_path
+from .qt_theme import apply_theme
+from .util import safe_filename
+from .volumes import is_eligible, list_volumes, mounted_drive
 
-LRESULT = ctypes.c_ssize_t
-
-WM_DESTROY = 0x0002
-WM_CLOSE = 0x0010
 WM_DEVICECHANGE = 0x0219
-WM_APP = 0x8000
-WM_CONTEXTMENU = 0x007B
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP = 0x0202
-WM_LBUTTONDBLCLK = 0x0203
-WM_RBUTTONUP = 0x0205
-NIN_SELECT = 0x0400
-
-NIM_ADD = 0
-NIM_MODIFY = 1
-NIM_DELETE = 2
-NIM_SETVERSION = 4
-NIF_MESSAGE = 0x0001
-NIF_ICON = 0x0002
-NIF_TIP = 0x0004
-NIF_INFO = 0x0010
-NIIF_INFO = 0x0001
-NOTIFYICON_VERSION_4 = 4
-
 DBT_DEVICEARRIVAL = 0x8000
 DBT_DEVICEREMOVECOMPLETE = 0x8004
-DEVICE_NOTIFY_WINDOW_HANDLE = 0x0000
 DBT_DEVTYP_DEVICEINTERFACE = 0x0005
+DEVICE_NOTIFY_WINDOW_HANDLE = 0x0000
 
-MF_STRING = 0x0000
-MF_SEPARATOR = 0x0800
-TPM_RIGHTBUTTON = 0x0002
-TPM_RETURNCMD = 0x0100
-TPM_NONOTIFY = 0x0080
-
-IMAGE_ICON = 1
-LR_LOADFROMFILE = 0x0010
-LR_DEFAULTSIZE = 0x0040
-IDI_APPLICATION = 32512
-HWND_MESSAGE = -3
+user32 = ctypes.windll.user32
 
 
 class GUID(ctypes.Structure):
@@ -72,36 +42,6 @@ GUID_DEVINTERFACE_VOLUME = GUID(
     0x11D0,
     (ctypes.c_ubyte * 8)(0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B),
 )
-
-
-class POINT(ctypes.Structure):
-    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
-
-
-class MSG(ctypes.Structure):
-    _fields_ = [
-        ("hwnd", wintypes.HWND),
-        ("message", wintypes.UINT),
-        ("wParam", wintypes.WPARAM),
-        ("lParam", wintypes.LPARAM),
-        ("time", wintypes.DWORD),
-        ("pt", POINT),
-    ]
-
-
-class WNDCLASSW(ctypes.Structure):
-    _fields_ = [
-        ("style", wintypes.UINT),
-        ("lpfnWndProc", ctypes.c_void_p),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HANDLE),
-        ("hbrBackground", wintypes.HANDLE),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-    ]
 
 
 class DEV_BROADCAST_HDR(ctypes.Structure):
@@ -122,108 +62,90 @@ class DEV_BROADCAST_DEVICEINTERFACE_W(ctypes.Structure):
     ]
 
 
-class NOTIFYICONDATAW(ctypes.Structure):
+class MSG(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", wintypes.HWND),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
-        ("hIcon", wintypes.HICON),
-        ("szTip", wintypes.WCHAR * 128),
-        ("dwState", wintypes.DWORD),
-        ("dwStateMask", wintypes.DWORD),
-        ("szInfo", wintypes.WCHAR * 256),
-        ("uTimeoutOrVersion", wintypes.UINT),
-        ("szInfoTitle", wintypes.WCHAR * 64),
-        ("dwInfoFlags", wintypes.DWORD),
-        ("guidItem", GUID),
-        ("hBalloonIcon", wintypes.HICON),
+        ("hwnd", wintypes.HWND),
+        ("message", wintypes.UINT),
+        ("wParam", wintypes.WPARAM),
+        ("lParam", wintypes.LPARAM),
+        ("time", wintypes.DWORD),
+        ("pt", wintypes.POINT),
     ]
 
 
-WNDPROC = ctypes.WINFUNCTYPE(
-    LRESULT,
-    wintypes.HWND,
-    wintypes.UINT,
-    wintypes.WPARAM,
-    wintypes.LPARAM,
-)
+user32.RegisterDeviceNotificationW.restype = wintypes.HANDLE
+user32.RegisterDeviceNotificationW.argtypes = [
+    wintypes.HANDLE,
+    wintypes.LPVOID,
+    wintypes.DWORD,
+]
+user32.UnregisterDeviceNotification.restype = wintypes.BOOL
+user32.UnregisterDeviceNotification.argtypes = [wintypes.HANDLE]
 
 
-def _configure_winapi() -> None:
-    user32.CreateWindowExW.restype = wintypes.HWND
-    user32.CreateWindowExW.argtypes = [
-        wintypes.DWORD,
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.HWND,
-        wintypes.HMENU,
-        wintypes.HINSTANCE,
-        wintypes.LPVOID,
-    ]
-    user32.RegisterClassW.restype = wintypes.ATOM
-    user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
-    user32.DefWindowProcW.restype = LRESULT
-    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-    user32.GetMessageW.restype = wintypes.BOOL
-    user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
-    user32.TranslateMessage.restype = wintypes.BOOL
-    user32.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
-    user32.DispatchMessageW.restype = LRESULT
-    user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
-    user32.PostMessageW.restype = wintypes.BOOL
-    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-    user32.DestroyWindow.restype = wintypes.BOOL
-    user32.DestroyWindow.argtypes = [wintypes.HWND]
-    user32.PostQuitMessage.restype = None
-    user32.PostQuitMessage.argtypes = [ctypes.c_int]
-    user32.CreatePopupMenu.restype = wintypes.HMENU
-    user32.AppendMenuW.restype = wintypes.BOOL
-    user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR]
-    user32.TrackPopupMenu.restype = wintypes.BOOL
-    user32.TrackPopupMenu.argtypes = [
-        wintypes.HMENU,
-        wintypes.UINT,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.HWND,
-        wintypes.LPRECT,
-    ]
-    user32.DestroyMenu.restype = wintypes.BOOL
-    user32.DestroyMenu.argtypes = [wintypes.HMENU]
-    user32.LoadImageW.restype = wintypes.HANDLE
-    user32.LoadImageW.argtypes = [
-        wintypes.HINSTANCE,
-        wintypes.LPCWSTR,
-        wintypes.UINT,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.UINT,
-    ]
-    user32.LoadIconW.restype = wintypes.HICON
-    user32.LoadIconW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
-    user32.RegisterDeviceNotificationW.restype = wintypes.HANDLE
-    user32.RegisterDeviceNotificationW.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD]
-    user32.GetCursorPos.restype = wintypes.BOOL
-    user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
-    shell32.Shell_NotifyIconW.restype = wintypes.BOOL
-    shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
-    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+class _DeviceChangeFilter(QAbstractNativeEventFilter):
+    """捕获 WM_DEVICECHANGE 广播，立即唤醒后台服务。"""
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        super().__init__()
+        self._callback = callback
+
+    def nativeEventFilter(self, eventType, message):
+        try:
+            et = bytes(eventType)
+        except Exception:
+            et = str(eventType).encode("utf-8")
+        if et == b"windows_generic_MSG":
+            try:
+                msg = ctypes.cast(int(message), ctypes.POINTER(MSG)).contents
+                if msg.message == WM_DEVICECHANGE and msg.wParam in (
+                    DBT_DEVICEARRIVAL,
+                    DBT_DEVICEREMOVECOMPLETE,
+                ):
+                    try:
+                        self._callback()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return False, 0
 
 
-_configure_winapi()
+class _DeviceWatcher(QWidget):
+    """隐藏窗口：注册设备通知，使 WM_DEVICECHANGE 能送达事件循环。"""
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.Tool)
+        self.setWindowTitle("DiskMenuDeviceWatcher")
+        self._reg_handle = None
+
+    def start(self) -> None:
+        self.setAttribute(Qt.WA_DontShowOnScreen, True)
+        self.winId()  # 强制创建原生窗口
+        dbi = DEV_BROADCAST_DEVICEINTERFACE_W()
+        dbi.dbcc_size = ctypes.sizeof(DEV_BROADCAST_DEVICEINTERFACE_W)
+        dbi.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE
+        dbi.dbcc_reserved = 0
+        dbi.dbcc_classguid = GUID_DEVINTERFACE_VOLUME
+        self._reg_handle = user32.RegisterDeviceNotificationW(
+            int(self.winId()),
+            ctypes.byref(dbi),
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        )
+
+    def stop(self) -> None:
+        if self._reg_handle:
+            try:
+                user32.UnregisterDeviceNotification(self._reg_handle)
+            except Exception:
+                pass
+            self._reg_handle = None
 
 
-class TrayIcon:
-    """托盘图标 + 隐藏消息窗口。必须在 Windows 上使用。"""
+class TrayIcon(QObject):
+    """系统托盘图标（QSystemTrayIcon）。"""
+
+    notify_requested = Signal(str, str)
 
     def __init__(
         self,
@@ -231,232 +153,206 @@ class TrayIcon:
         on_open: Optional[Callable[[], None]] = None,
         on_quit: Optional[Callable[[], None]] = None,
         on_device_change: Optional[Callable[[], None]] = None,
+        db_path: Optional[str] = None,
     ) -> None:
+        super().__init__()
         self.title = title
         self.on_open = on_open
         self.on_quit = on_quit
-        self.on_device_change = on_device_change
-        self._hwnd: Optional[int] = None
-        self._nid: Optional[NOTIFYICONDATAW] = None
-        self._thread: Optional[threading.Thread] = None
-        self._icon_handle = None
-        self._wndproc = WNDPROC(self._window_proc)
-        self._callback_message = WM_APP + 1
-        self._class_atom = None
-        self._dev_notify_handle = None
-        self._last_open_time = 0.0
+        self._on_device_change = on_device_change
+        self._db_path = db_path
+        self._tray: Optional[QSystemTrayIcon] = None
+        self._menu: Optional[QMenu] = None
+        self._scan_action = None
+        self._watcher: Optional[_DeviceWatcher] = None
+        self._filter: Optional[_DeviceChangeFilter] = None
+        self._thread: Optional[threading.Thread] = None  # 兼容旧调用方
+
+    # ---------------- 生命周期 ----------------
 
     def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self.run, name="DiskMenu-tray", daemon=True)
-        self._thread.start()
+        app = QApplication.instance() or QApplication([])
+        apply_theme(app, "light")
+        app.setQuitOnLastWindowClosed(False)
+        self.notify_requested.connect(self._show_message)
 
-    def run(self) -> None:
-        try:
-            self._create_window()
-            self._add_icon()
-            self._register_device_notifications()
-            msg = MSG()
-            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
-            self._remove_icon()
-            if self._hwnd:
-                user32.DestroyWindow(self._hwnd)
-                self._hwnd = None
-        except Exception as exc:
-            self._log_error(f"托盘线程异常：{exc}")
-            raise
+        tray = QSystemTrayIcon(QIcon(str(icon_path())), app)
+        tray.setToolTip(self.title)
+        menu = QMenu()
+        open_action = menu.addAction("打开主界面")
+        open_action.triggered.connect(self._on_open)
+        menu.addSeparator()
+        self._scan_action = menu.addAction("开始扫描")
+        self._scan_action.triggered.connect(self._toggle_scan)
+        export_action = menu.addAction("导出报告")
+        export_action.triggered.connect(self._export_all)
+        menu.addSeparator()
+        quit_action = menu.addAction("退出")
+        quit_action.triggered.connect(self._quit)
+        menu.aboutToShow.connect(self._update_menu)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_activated)
+        tray.show()
+        self._tray = tray
+        self._menu = menu
+
+        self._filter = _DeviceChangeFilter(self._on_device_change_event)
+        app.installNativeEventFilter(self._filter)
+        self._watcher = _DeviceWatcher()
+        self._watcher.start()
+
+        app.exec()
+
+        # 事件循环退出后的清理
+        if self._filter is not None:
+            try:
+                app.removeNativeEventFilter(self._filter)
+            except Exception:
+                pass
+            self._filter = None
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
+        if self._tray is not None:
+            self._tray.hide()
+            self._tray = None
 
     def stop(self) -> None:
-        if self._hwnd:
-            user32.PostMessageW(self._hwnd, WM_CLOSE, 0, 0)
+        if self._tray is not None:
+            try:
+                self._tray.hide()
+            except Exception:
+                pass
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def wait(self) -> None:
+        """兼容入口：Qt 事件循环在 start() 内阻塞运行，无需额外等待。"""
 
     def notify(self, title: str, message: str) -> None:
-        if self._nid is None:
-            return
-        try:
-            nid = self._nid
-            nid.uFlags = NIF_INFO
-            nid.szInfoTitle = (title or APP_TITLE)[:63]
-            nid.szInfo = (message or "")[:255]
-            nid.dwInfoFlags = NIIF_INFO
-            nid.uTimeoutOrVersion = 5000
-            shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
-        except Exception:
-            pass
+        """显示托盘气泡通知（线程安全）。"""
+        self.notify_requested.emit(title, message)
 
-    def _log_error(self, text: str) -> None:
-        try:
-            log_path = app_data_dir() / "error.log"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(text + "\n")
-        except Exception:
-            pass
+    def _show_message(self, title: str, message: str) -> None:
+        if self._tray is not None:
+            self._tray.showMessage(title, message, QSystemTrayIcon.Information, 5000)
 
-    # ---------------- internals ----------------
+    # ---------------- 事件 ----------------
 
-    def _window_proc(self, hwnd, msg, wparam, lparam):
-        if msg == WM_DEVICECHANGE:
-            if wparam in (DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE):
-                if self.on_device_change:
-                    try:
-                        self.on_device_change()
-                    except Exception:
-                        pass
-            return 0
-        if msg == self._callback_message:
-            # Shell_NotifyIcon 把鼠标事件包装在回调消息里，lParam 低 16 位是具体通知
-            code = lparam & 0xFFFF
-            if code in (WM_CONTEXTMENU, WM_RBUTTONUP):
-                self._show_menu()
-                return 0
-            if code in (WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT):
-                self._open_gui()
-                return 0
-            return 0
-        if msg in (WM_CONTEXTMENU, WM_RBUTTONUP):
-            self._show_menu()
-            return 0
-        if msg == WM_LBUTTONDBLCLK:
-            self._open_gui()
-            return 0
-        if msg == WM_CLOSE:
-            user32.DestroyWindow(hwnd)
-            return 0
-        if msg == WM_DESTROY:
-            user32.PostQuitMessage(0)
-            return 0
-        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+    def _on_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._on_open()
 
-    def _open_gui(self) -> None:
+    def _on_open(self) -> None:
         if self.on_open:
-            now = time.time()
-            if now - self._last_open_time < 0.8:
-                return
-            self._last_open_time = now
             try:
                 self.on_open()
             except Exception:
                 pass
 
-    def _create_window(self) -> None:
-        hinst = kernel32.GetModuleHandleW(None)
-        class_name = "DiskMenuTrayWindow"
-        wc = WNDCLASSW()
-        wc.style = 0
-        wc.lpfnWndProc = ctypes.cast(self._wndproc, ctypes.c_void_p).value
-        wc.cbClsExtra = 0
-        wc.cbWndExtra = 0
-        wc.hInstance = hinst
-        wc.hIcon = None
-        wc.hCursor = None
-        wc.hbrBackground = None
-        wc.lpszMenuName = None
-        wc.lpszClassName = class_name
-        self._class_atom = user32.RegisterClassW(ctypes.byref(wc))
-        if self._class_atom == 0:
-            raise ctypes.WinError()
-        self._hwnd = user32.CreateWindowExW(
-            0,
-            class_name,
-            self.title,
-            0,
-            0,
-            0,
-            0,
-            0,
-            HWND_MESSAGE,
-            None,
-            hinst,
-            None,
-        )
-        if not self._hwnd:
-            raise ctypes.WinError()
-
-    def _add_icon(self) -> None:
-        nid = NOTIFYICONDATAW()
-        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        nid.hWnd = self._hwnd
-        nid.uID = 1
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
-        nid.uCallbackMessage = WM_APP + 1
-        nid.hIcon = self._load_icon()
-        nid.szTip = self.title[:127]
-        if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
-            self._log_error(f"Shell_NotifyIcon NIM_ADD 失败：{kernel32.GetLastError()}")
-            return
-        nid.uTimeoutOrVersion = NOTIFYICON_VERSION_4
-        shell32.Shell_NotifyIconW(NIM_SETVERSION, ctypes.byref(nid))
-        self._nid = nid
-
-    def _load_icon(self):
-        try:
-            path = str(icon_path())
-            if path and os.path.exists(path):
-                handle = user32.LoadImageW(
-                    None,
-                    path,
-                    IMAGE_ICON,
-                    0,
-                    0,
-                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
-                )
-                if handle:
-                    return handle
-        except Exception:
-            pass
-        return user32.LoadIconW(None, IDI_APPLICATION)
-
-    def _register_device_notifications(self) -> None:
-        dbi = DEV_BROADCAST_DEVICEINTERFACE_W()
-        dbi.dbcc_size = ctypes.sizeof(DEV_BROADCAST_DEVICEINTERFACE_W)
-        dbi.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE
-        dbi.dbcc_reserved = 0
-        dbi.dbcc_classguid = GUID_DEVINTERFACE_VOLUME
-        self._dev_notify_handle = user32.RegisterDeviceNotificationW(
-            self._hwnd,
-            ctypes.byref(dbi),
-            DEVICE_NOTIFY_WINDOW_HANDLE,
-        )
-
-    def _remove_icon(self) -> None:
-        if self._nid is not None:
-            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
-            self._nid = None
-
-    def _show_menu(self) -> None:
-        pt = POINT()
-        if not user32.GetCursorPos(ctypes.byref(pt)):
-            pt.x = 0
-            pt.y = 0
-        x = int(pt.x)
-        y = int(pt.y)
-        menu = user32.CreatePopupMenu()
-        if not menu:
-            return
-        user32.AppendMenuW(menu, MF_STRING, 1, "打开主界面")
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, 2, "退出")
-        cmd = user32.TrackPopupMenu(
-            menu,
-            TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-            x,
-            y,
-            0,
-            self._hwnd,
-            None,
-        )
-        user32.DestroyMenu(menu)
-        if cmd == 1 and self.on_open:
+    def _on_device_change_event(self) -> None:
+        if self._on_device_change:
             try:
-                self.on_open()
+                self._on_device_change()
             except Exception:
                 pass
-        elif cmd == 2 and self.on_quit:
+
+    def _quit(self) -> None:
+        if self.on_quit:
             try:
                 self.on_quit()
             except Exception:
                 pass
+
+    # ---------------- 菜单动作 ----------------
+
+    def _update_menu(self) -> None:
+        if self._scan_action is not None:
+            self._scan_action.setText("停止扫描" if self._scan_active() else "开始扫描")
+
+    def _scan_active(self) -> bool:
+        conn = db.connect(self._db_path)
+        try:
+            db.init_db(conn)
+            return any(r["status"] in ("scanning", "queued") for r in db.list_disks(conn))
+        finally:
+            conn.close()
+
+    def _toggle_scan(self) -> None:
+        if self._scan_active():
+            conn = db.connect(self._db_path)
+            try:
+                db.init_db(conn)
+                for req in conn.execute("SELECT id FROM scan_requests WHERE status='queued'").fetchall():
+                    db.finish_scan_request(conn, req["id"], False, "用户取消")
+            finally:
+                conn.close()
+            self.notify(APP_TITLE, "已取消排队中的扫描任务")
+            return
+
+        conn = db.connect(self._db_path)
+        try:
+            db.init_db(conn)
+            settings = db.get_settings(conn)
+            app_drive = mounted_drive()
+            count = 0
+            for vol in list_volumes():
+                if is_eligible(vol, settings, app_drive):
+                    if db.request_scan(conn, vol.disk_id, "incremental"):
+                        count += 1
+        finally:
+            conn.close()
+        if count:
+            self._on_device_change_event()  # 唤醒服务立即处理队列
+        self.notify(APP_TITLE, f"已加入 {count} 块硬盘的增量扫描队列" if count else "没有可扫描的硬盘")
+
+    def _export_all(self) -> None:
+        conn = db.connect(self._db_path)
+        try:
+            db.init_db(conn)
+            disks = [r for r in db.list_disks(conn) if r["status"] == "completed" and r["total_files"]]
+        finally:
+            conn.close()
+        if not disks:
+            self.notify(APP_TITLE, "没有可导出的索引（需要先完成扫描）")
+            return
+        if len(disks) == 1:
+            disk = disks[0]
+            serial = disk["volume_serial"] or ""
+            base = safe_filename(disk["label"].strip() or f"{disk['drive_letter'].replace(':', '')}_{serial}")
+            default = f"DiskMenu_{base}_{datetime.now():%Y%m%d_%H%M}.html"
+            path, _ = QFileDialog.getSaveFileName(
+                None,
+                "导出为 HTML 离线报告",
+                default,
+                "HTML 文件 (*.html)",
+            )
+            if not path:
+                return
+            self._run_export([(disk, path)])
+            return
+        folder = QFileDialog.getExistingDirectory(None, "选择导出文件夹")
+        if not folder:
+            return
+        jobs = []
+        for disk in disks:
+            serial = disk["volume_serial"] or ""
+            base = safe_filename(disk["label"].strip() or f"{disk['drive_letter'].replace(':', '')}_{serial}")
+            out = f"{folder}\\{base}_{datetime.now():%Y%m%d_%H%M%S}.html"
+            jobs.append((disk, out))
+        self._run_export(jobs)
+
+    def _run_export(self, jobs: list) -> None:
+        threading.Thread(target=self._export_worker, args=(jobs,), daemon=True).start()
+
+    def _export_worker(self, jobs: list) -> None:
+        ok_count = 0
+        for disk, out in jobs:
+            try:
+                ok, _msg = exporter.export_html(self._db_path, disk["disk_id"], out)
+                if ok:
+                    ok_count += 1
+            except Exception:
+                pass
+        self.notify_requested.emit(APP_TITLE, f"导出完成：{ok_count}/{len(jobs)}")
