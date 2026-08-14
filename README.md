@@ -10,6 +10,20 @@ v1.3 使用 **PySide6（Qt for Python）** 重构了界面与托盘层，业务�
 
 ## 界面预览
 
+软件主界面 · 浅色主题：
+
+![软件主界面 · 浅色](assets/ui_light.png)
+
+软件主界面 · 深色主题：
+
+![软件主界面 · 深色](assets/ui_dark.png)
+
+设置对话框：
+
+![设置对话框 · 浅色](assets/ui_settings_light.png)
+
+![设置对话框 · 深色](assets/ui_settings_dark.png)
+
 导出的 HTML 目录报告（演示数据）：
 
 ![HTML 目录报告界面](assets/screenshot_html_v2.png)
